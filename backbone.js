@@ -124,7 +124,7 @@
     this.attributes = {};
     this._escapedAttributes = {};
     this.cid = _.uniqueId('c');
-    this.set(attributes, {silent : true});
+    this.set(attributes, {validate : false, silent: true});
     this._changed = false;
     this._previousAttributes = _.clone(this.attributes);
     if (options && options.collection) this.collection = options.collection;
@@ -180,7 +180,7 @@
       var now = this.attributes, escaped = this._escapedAttributes;
 
       // Run validation.
-      if (!options.silent && this.validate && !this._performValidation(attrs, options)) return false;
+      if(!this._performValidation(attrs, options)) return false;
 
       // Check for changes of `id`.
       if ('id' in attrs) this.id = attrs.id;
@@ -210,7 +210,7 @@
       // Run validation.
       var validObj = {};
       validObj[attr] = void 0;
-      if (!options.silent && this.validate && !this._performValidation(validObj, options)) return false;
+      if(!this._performValidation(validObj, options)) return false;
 
       // Remove the attribute.
       delete this.attributes[attr];
@@ -232,7 +232,7 @@
       // Run validation.
       var validObj = {};
       for (attr in old) validObj[attr] = void 0;
-      if (!options.silent && this.validate && !this._performValidation(validObj, options)) return false;
+      if(!this._performValidation(validObj, options)) return false;
 
       this.attributes = {};
       this._escapedAttributes = {};
@@ -267,7 +267,9 @@
     // state will be `set` again.
     save : function(attrs, options) {
       options || (options = {});
-      if (attrs && !this.set(attrs, options)) return false;
+
+      if (attrs && !this.set(attrs, _.extend(options, {silent: true}))) return false;
+      if(!this._performValidation(null, options)) return false;
       var model = this;
       var success = options.success;
       options.success = function(resp) {
@@ -365,24 +367,124 @@
     previousAttributes : function() {
       return _.clone(this._previousAttributes);
     },
+    
+    // Object to store all the validation rules that apply to this object's
+    // attributes
+    validations: {},
+  
+    // Add a validation rule on a particular attribute. 
+    validateWith: function(attr, validations) {
+      if(_.isFunction(validations)) validations = {anonymous: validations};
+
+      if(_.isUndefined(this.validations[attr])) {
+        this.validations[attr] = {};
+      } else if(_.isFunction(this.validations[attr])) {
+        this.validations[attr] = _.extend({}, {anonymous: this.validations[attr]});
+      }
+      _.extend(this.validations[attr], validations);
+      return true;
+    },
 
     // Run validation against a set of incoming attributes, returning `true`
     // if all is well. If a specific `error` callback has been passed,
     // call that instead of firing the general `"error"` event.
     _performValidation : function(attrs, options) {
-      var error = this.validate(attrs);
-      if (error) {
+      options || (options = {});
+      if(options.validate === false || options.silent === true) {
+        return true;
+      }
+      var errors = this.validate(attrs);
+      if (!_.isUndefined(errors) && !_.isEmpty(errors)) {
         if (options.error) {
-          options.error(this, error);
+          options.error(this, errors);
         } else {
-          this.trigger('error', this, error, options);
+          this.trigger('error', this, errors, options);
         }
         return false;
       }
       return true;
-    }
+    },
+   
+    // Built in validator which validates each attribute using the rules
+    // specified in the model's validations array.
+    validate: function(attrs) {
+      var self = this;
+      if(!attrs) {
+        all = true;
+        attrs = this.attributes;
+      }
+      if(_.isFunction(this.validations)) {
+        var e = [];
+        this.validations.call(this, attrs, e);
+        return _.isEmpty(e) ? {} : {base:e};
+      } else {
+        return _.reduce(this.validations, function(errors, rules, name) {
+          // Prepare attribute to pass to rules
+          if(name == 'base') {
+            if(!all) return errors;
+            attr = attrs;
+          } else {
+            attr = attrs[name];
+          }
 
+          if(_.isUndefined(attr)) return errors;
+          
+          // Prepare rule to execute 
+          if(_.isFunction(rules)) {
+            rules = {anonymous: rules};
+          }
+          
+          var attrErrors = (errors[name] || []);
+          _.each(rules, function(rule, ruleName) {
+            // Grab rule from registry if its just a key
+            if(!_.isFunction(rule)) {
+              rule = Backbone.Validation.rules[ruleName];
+            }
+            rule.call(self, attr, attrErrors);
+          });
+
+          if(!_.isEmpty(attrErrors)) errors[name] = attrErrors;
+          return errors;
+        }, {});
+      }
+    },
+
+    // Determines the state of this instance's validity. If things have been
+    // set with {silent: true} or {validate: false}, invalid data may creep in.
+    // Use this to check if the set attributes are in fact valid.
+    isValid: function() {
+      return _.isEmpty(this.errors());
+    },
+
+    // Returns the errors on the base. Revalidates if the base has changed
+    // since the last validation.
+    errors: function() {
+      var ret = {};
+      this._performValidation(null, {
+        error: function(model, errors) {
+          ret = errors;
+        }
+      });
+      return ret;
+    }
   });
+
+
+  // Backbone.Validation
+  // -------------------
+  
+  Backbone.Validation = {
+    // Holds all the registered rules that can be referenced in a model.
+    rules: {},
+
+    // Adds a new rule to the available set, making it available for reference in
+    // a model's validations declaration. Use this when you need to add a 
+    // validation rule and use it to validate several attributes or several 
+    // different models.
+    addRule: function(name, rule) {
+      Backbone.Validation.rules[name] = rule;
+    }
+  };
 
   // Backbone.Collection
   // -------------------
